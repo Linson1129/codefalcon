@@ -1,6 +1,7 @@
 # CodeFalcon
 
-> 🔍 猎鹰般精准的多Agent代码审查系统 —— 面向Vibe Coding时代的AI代码审计Agent
+> 猎鹰般俯视你的代码，然后揪出问题
+一个多Agent代码审查系统项目 —— 面向Vibe Coding时代的AI代码审计Agent
 
 ## 定位
 
