@@ -121,5 +121,14 @@ def done(todo_id):
         click.echo(f"❌ 未找到待处理的 {todo_id}", err=True)
 
 
+@cli.command()
+def clean():
+    """清理TODOS.md中的重复和低价值待办事项"""
+    from src.output.todo_manager import TodoManager
+    mgr = TodoManager()
+    removed = mgr.cleanup(project_root=".")
+    click.echo(f"🧹 已清理 {removed} 条待办事项")
+
+
 if __name__ == "__main__":
     cli()
