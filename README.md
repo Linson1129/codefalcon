@@ -14,8 +14,8 @@
 ```
 
 - **规则引擎**：确定性安全检查（硬编码密钥、注入检测），0 Token成本
-- **Agent A**：Bug检测 + 性能分析，DeepSeek-V3驱动
-- **Agent B**：风格检查 + 验收，Qwen驱动
+- **Agent A**：Bug检测 + 性能分析（需自行配制AI API）
+- **Agent B**：风格检查 + 验收（需自行配制AI API）
 - **汇总仲裁**：去重合并、优先级排序、冲突检测
 - **人机回环**：复杂问题交互式确认
 
@@ -25,8 +25,8 @@
 
 ### 环境要求
 - Python 3.11+
-- DeepSeek API Key（主力模型）
-- Qwen API Key（可选，用于降级）
+- DeepSeek API Key（可选）#AI可用自己的
+- Qwen API Key（可选）#用于处理低成本任务目标，降低成本
 
 ### 安装
 
