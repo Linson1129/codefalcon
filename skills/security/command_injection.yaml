@@ -1,0 +1,13 @@
+name: command_injection
+description: 检测命令注入风险（os.system、eval、shell=True）
+category: security
+severity: warning
+pattern: '(?i)(os\.system|os\.popen|eval\s*\(|exec\s*\(|shell\s*=\s*True)'
+llm_prompt: |
+  请检查是否存在命令注入风险：
+  - os.system() 和 os.popen() 应避免使用
+  - eval() 和 exec() 绝对不要处理用户输入
+  - subprocess 调用时 shell=True 存在注入风险
+  建议使用 subprocess.run() 并设置 shell=False，参数用列表传递。
+suggestion_template: '命令注入风险：建议用 subprocess.run() 替代，并设置 shell=False'
+enabled: true

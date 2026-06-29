@@ -1,0 +1,13 @@
+name: sql_injection
+description: 检测 SQL 语句的字符串拼接（可能导致注入）
+category: security
+severity: error
+pattern: |-
+  (?i)(execute|cursor\.execute)\s*\(\s*[f"'][^"']*(\%s|\{\}|format\(|\+)[^"']*["']
+llm_prompt: |
+  请检查 SQL 语句是否使用了字符串拼接或格式化：
+  - 避免使用 % 格式化、.format()、f-string 拼接 SQL
+  - 避免使用 + 拼接 SQL 字符串
+  正确做法：使用参数化查询（? 占位符或命名占位符）
+suggestion_template: 'SQL 注入风险：请使用参数化查询代替字符串拼接'
+enabled: true

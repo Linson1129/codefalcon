@@ -1,4 +1,8 @@
-"""问题优先级排序器 - 独立的优先级计算逻辑"""
+"""问题优先级排序器 - 统一的优先级计算逻辑
+
+所有排序逻辑集中在此模块，Aggregator 和 Reporter 均通过此模块排序，
+避免多套权重体系带来的维护负担。
+"""
 
 from typing import Any, Union
 
@@ -16,7 +20,7 @@ class Prioritizer:
     """问题优先级计算
 
     排序规则：
-    1. 类别优先：security > bug > performance > style
+    1. 类别优先：security > bug > architecture > performance > spec > style
     2. 严重程度：error > warning > info
     3. 同一优先级按行号排序
     """
@@ -24,8 +28,10 @@ class Prioritizer:
     CATEGORY_WEIGHT = {
         "security": 100,
         "bug": 80,
-        "performance": 60,
-        "style": 40,
+        "architecture": 60,
+        "performance": 40,
+        "spec": 30,
+        "style": 20,
     }
 
     SEVERITY_WEIGHT = {
@@ -50,7 +56,10 @@ class Prioritizer:
         summary = {
             "total": len(findings),
             "by_severity": {"error": 0, "warning": 0, "info": 0},
-            "by_category": {"security": 0, "bug": 0, "performance": 0, "style": 0},
+            "by_category": {
+                "security": 0, "bug": 0, "architecture": 0,
+                "performance": 0, "spec": 0, "style": 0,
+            },
         }
         for f in findings:
             sev = _f(f, "severity", "")

@@ -1,0 +1,14 @@
+name: solid_principles
+description: 检查是否违反 SOLID 原则
+category: architecture
+severity: warning
+llm_prompt: |
+  请检查代码是否违反 SOLID 原则：
+  - 单一职责原则（SRP）：类/函数只做一件事
+  - 开闭原则（OCP）：对扩展开放，对修改封闭
+  - 里氏替换原则（LSP）：子类可以替换父类
+  - 接口隔离原则（ISP）：接口应该小而专注
+  - 依赖倒置原则（DIP）：依赖抽象而不是具体实现
+  请重点关注类设计和模块耦合度。
+suggestion_template: ''
+enabled: true

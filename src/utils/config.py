@@ -44,13 +44,25 @@ class Config:
             return os.getenv(env_var, self.API_CONFIG[model]["default_base"])
         return os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
-    def get_max_review_files(self) -> int:
-        """一次审查的最大文件数"""
-        return int(os.getenv("CODEFALCON_MAX_FILES", "50"))
-
     def get_timeout(self) -> int:
         """LLM调用超时（秒）"""
-        return int(os.getenv("CODEFALCON_TIMEOUT", "60"))
+        return int(os.getenv("CODEFALCON_TIMEOUT", str(self.DEFAULT_TIMEOUT)))
+
+    # ---- 集中管理的常量 ----
+
+    DEFAULT_TIMEOUT: int = 60
+    MAX_RETRIES: int = 3
+    LLM_TEMPERATURE: float = 0.1
+    REVIEW_WINDOW: int = 10  # 滚动窗口保留报告数
+    MAX_LINE_LENGTH: int = 120
+    SPEC_TRUNCATE_CHARS: int = 4000
+    MCP_HTTP_PORT: int = 8765
+    DEPENDENCY_DISPLAY_LIMIT: int = 5  # prompt 中显示依赖模块数
+    DEFAULT_MAX_TOKENS: int = 50000  # 单次审查 Token 预算上限
+
+    def get_max_tokens(self) -> int:
+        """LLM 调用的 Token 预算上限"""
+        return int(os.getenv("CODEFALCON_MAX_TOKENS", str(self.DEFAULT_MAX_TOKENS)))
 
 
 @lru_cache()

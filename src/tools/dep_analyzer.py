@@ -79,16 +79,27 @@ class DependencyAnalyzer:
                 continue
 
     def _extract_imports(self, tree: ast.AST, current_file: str) -> list[str]:
-        """提取文件中的import依赖"""
+        """提取文件中的import依赖（返回文件路径格式）"""
         imports = []
-        current_dir = Path(current_file).parent
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    imports.append(alias.name)
+                    imports.append(self._module_to_path(alias.name))
             elif isinstance(node, ast.ImportFrom):
                 if node.module:
-                    imports.append(node.module)
+                    imports.append(self._module_to_path(node.module))
 
         return imports
+
+    @staticmethod
+    def _module_to_path(module_name: str) -> str:
+        """将模块名转换为相对文件路径
+
+        例如: src.utils.config → src/utils/config.py
+               os → os.py
+        """
+        # 如果已经是 .py 路径格式，直接返回
+        if module_name.endswith(".py"):
+            return module_name
+        return module_name.replace(".", "/") + ".py"

@@ -1,0 +1,145 @@
+name: CodeFalcon Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**.py'
+  push:
+    branches: [main]
+    paths:
+      - '**.py'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -v --tb=short
+
+  codefalcon-review:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 用于 git diff
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install CodeFalcon
+        run: pip install -e .
+
+      - name: Run CodeFalcon (diff mode dry-run)
+        id: review
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+        run: |
+          # Dry-run 模式：走完整 DAG 但不调真实 LLM
+          # 在 PR 上先验证流水线完整性，真实审查在本地执行
+          codefalcon review . --mode diff --base origin/${{ github.base_ref }} --json --dry-run 2>/tmp/review.log || true
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Post Review Comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // 读取审查日志
+            let logContent = '';
+            try {
+              logContent = fs.readFileSync('/tmp/review.log', 'utf8');
+            } catch (e) {
+              logContent = '审查日志暂不可用';
+            }
+
+            // 读取 latest.json 报告
+            let findingsSummary = '';
+            try {
+              const reportPath = 'reviews/latest.json';
+              if (fs.existsSync(reportPath)) {
+                const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+                const findings = report.findings || [];
+                if (findings.length === 0) {
+                  findingsSummary = '✅ **CodeFalcon 审查通过！** 未发现问题。';
+                } else {
+                  const bySeverity = {};
+                  for (const f of findings) {
+                    bySeverity[f.severity] = (bySeverity[f.severity] || 0) + 1;
+                  }
+                  const parts = [];
+                  if (bySeverity.error) parts.push(`🔴 **${bySeverity.error} 错误**`);
+                  if (bySeverity.warning) parts.push(`🟡 **${bySeverity.warning} 警告**`);
+                  if (bySeverity.info) parts.push(`🔵 **${bySeverity.info} 提示**`);
+                  findingsSummary = `📋 **发现 ${findings.length} 个问题**: ${parts.join('，')}`;
+
+                  // 列出前 10 个问题
+                  const topFindings = findings.slice(0, 10);
+                  findingsSummary += '\n\n| 严重度 | 类别 | 文件 | 行 | 问题 |\n';
+                  findingsSummary += '|--------|------|------|-----|------|\n';
+                  for (const f of topFindings) {
+                    const sev = {error: '🔴', warning: '🟡', info: '🔵'}[f.severity] || '⚪';
+                    findingsSummary += `| ${sev} | ${f.category} | \`${f.file}\` | ${f.line} | ${f.message} |\n`;
+                  }
+                  if (findings.length > 10) {
+                    findingsSummary += `\n*...还有 ${findings.length - 10} 个问题，详见审查报告*`;
+                  }
+                }
+
+                // 成本信息
+                if (report.cost && report.cost.total_tokens > 0) {
+                  findingsSummary += `\n\n💰 审查成本: $${parseFloat(report.cost.estimated_usd).toFixed(6)} (${report.cost.total_tokens} tokens)`;
+                }
+              }
+            } catch (e) {
+              findingsSummary = '⚠️ 审查报告生成失败，请检查日志。';
+            }
+
+            const body = `## 🔍 CodeFalcon 代码审查报告
+
+            ${findingsSummary}
+
+            ---
+            <details>
+            <summary>📝 审查日志（调试信息）</summary>
+
+            \`\`\`
+            ${logContent.slice(-5000)}
+            \`\`\`
+            </details>
+
+            <sub>由 [CodeFalcon](https://github.com) 自动生成 | ${new Date().toISOString().split('T')[0]}</sub>`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body.trim(),
+            });

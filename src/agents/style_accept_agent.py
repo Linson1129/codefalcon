@@ -19,8 +19,8 @@ class StyleAcceptAgent(BaseAgent):
     - 最终验收（综合规则引擎和Agent A的结果）
     """
 
-    def __init__(self):
-        super().__init__(name="AgentB_StyleAccept", model="qwen-turbo")
+    def __init__(self, dry_run: bool = False):
+        super().__init__(name="StyleAcceptAgent", model="qwen-turbo", dry_run=dry_run)
 
     def get_system_prompt(self) -> str:
         return """你是一个代码风格和验收专家，负责审查代码的可读性和规范性。
@@ -60,19 +60,30 @@ class StyleAcceptAgent(BaseAgent):
 
         findings = []
 
-        for file_path, content in state.target_files.items():
+        # 获取 Skill 上下文
+        skill_context = self._build_skill_context(category="style")
+
+        files_to_scan = state.filtered_files if state.filtered_files else state.target_files
+        for file_path, content in files_to_scan.items():
             try:
                 user_prompt = self._build_review_prompt(
                     file_path, content, state.rule_findings,
-                    state.dependency_graph,
+                    state.dependency_graph, skill_context,
                 )
                 result = self.call_llm(
                     system_prompt=self.get_system_prompt(),
                     user_prompt=user_prompt,
                 )
 
-                parsed = self._parse_response(result.get("content", "{}"))
-                findings.extend(self._to_findings(parsed.get("findings", []), file_path))
+                parsed = self.parse_response(result.get("content", "{}"))
+                findings.extend(
+                    self.to_findings(
+                        parsed.get("findings", []), file_path,
+                        agent_source="agent_b",
+                        default_category="style",
+                        default_severity="info",
+                    )
+                )
 
             except Exception as e:
                 logger.error(f"[{self.name}] 审查 {file_path} 失败: {e}")
@@ -84,50 +95,25 @@ class StyleAcceptAgent(BaseAgent):
     def _build_review_prompt(
         self, file_path: str, content: str,
         rule_findings: list[Finding], dependency_graph: dict,
+        skill_context: str = "",
     ) -> str:
-        """构建审查提示词（含规则引擎发现 + 依赖上下文）"""
+        """构建审查提示词（含规则引擎发现 + 依赖上下文 + Skill）"""
         prompt_parts = [f"请审查以下文件的代码风格: {file_path}\n"]
         prompt_parts.append(f"```\n{content}\n```\n")
+
+        # Skill 上下文
+        if skill_context:
+            prompt_parts.append(skill_context)
 
         if rule_findings:
             prompt_parts.append("--- 规则引擎已发现问题 ---")
             for f in rule_findings:
                 prompt_parts.append(f"  - [{f.file_path}:{f.line}] {f.message}")
 
-        # 依赖关系
-        dependents = dependency_graph.get("dependents", {}).get(file_path, [])
-        if dependents:
-            prompt_parts.append(f"\n依赖此文件的模块: {', '.join(dependents[:5])}")
+        # 依赖关系（使用基类方法）
+        dep_ctx = self._build_dependency_context(file_path, dependency_graph)
+        if dep_ctx:
+            prompt_parts.append(f"\n{dep_ctx}")
 
         return "\n".join(prompt_parts)
 
-    def _parse_response(self, content: str) -> dict:
-        """解析LLM响应"""
-        try:
-            if "```json" in content:
-                start = content.index("```json") + 7
-                end = content.index("```", start)
-                content = content[start:end]
-            elif "```" in content:
-                start = content.index("```") + 3
-                end = content.index("```", start)
-                content = content[start:end]
-            return json.loads(content.strip())
-        except (json.JSONDecodeError, ValueError):
-            logger.warning(f"[{self.name}] LLM响应解析失败")
-            return {"findings": [], "acceptance_summary": ""}
-
-    def _to_findings(self, raw_findings: list[dict], file_path: str) -> list[Finding]:
-        """转换为Finding对象"""
-        result = []
-        for f in raw_findings:
-            result.append(Finding(
-                severity=f.get("severity", "info"),
-                category=f.get("category", "style"),
-                file_path=f.get("file_path", file_path),
-                line=f.get("line", 0),
-                message=f.get("message", ""),
-                suggestion=f.get("suggestion", ""),
-                agent_source="agent_b",
-            ))
-        return result

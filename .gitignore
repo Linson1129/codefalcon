@@ -23,6 +23,7 @@ env/
 
 # 审查报告（生成内容，不提交）
 reviews/
+.codefalcon/
 
 # 系统文件
 .DS_Store

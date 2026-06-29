@@ -1,0 +1,13 @@
+name: module_coupling
+description: 检查模块间耦合度是否过高
+category: architecture
+severity: warning
+llm_prompt: |
+  请检查模块耦合度：
+  - 避免循环依赖（A 导入 B，B 导入 A）
+  - 避免模块间过多直接引用
+  - 优先使用依赖注入而非硬编码依赖
+  - 检查 __init__.py 是否暴露了过多内部实现
+  高耦合会导致代码难以维护和测试。
+suggestion_template: ''
+enabled: true

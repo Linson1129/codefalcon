@@ -1,11 +1,15 @@
-"""汇总仲裁器 - 去重合并、优先级排序、冲突检测"""
+"""汇总仲裁器 - 去重合并、冲突检测、生成待办事项
+
+排序和统计逻辑已统一由 Prioritizer 模块集中管理，
+此处仅保留去重、冲突检测、TODO 生成等聚合专属逻辑。
+"""
 
 import logging
 import os
 from collections import defaultdict
-from pathlib import Path
 
 from src.orchestrator.state import Finding, ReviewState
+from src.review.prioritizer import Prioritizer
 
 logger = logging.getLogger(__name__)
 
@@ -14,15 +18,18 @@ class Aggregator:
     """审查结果汇总器
 
     职责：
-    - 合并规则引擎、Agent A、Agent B 的发现
-    - 按 file:line 去重
-    - 按严重程度和类别排序
-    - 检测Agent间意见冲突
-    - 生成待确认问题列表
+    - 合并规则引擎、所有 Agent 的发现
+    - 按 file:line:category 去重（保留最高严重度）
+    - 按优先级排序（通过 Prioritizer 统一排序）
+    - 检测 Agent 间意见冲突
+    - 生成待确认问题列表与待办事项
     """
 
     SEVERITY_PRIORITY = {"error": 3, "warning": 2, "info": 1}
-    CATEGORY_PRIORITY = {"security": 5, "bug": 4, "performance": 3, "style": 2}
+    CATEGORY_PRIORITY = {
+        "security": 6, "bug": 5, "architecture": 4, "performance": 3,
+        "spec": 2, "style": 1,
+    }
 
     def aggregate(self, state: ReviewState) -> ReviewState:
         """汇总所有审查发现"""
@@ -31,19 +38,24 @@ class Aggregator:
         all_findings = (
             state.rule_findings + state.style_findings
             + state.agent_a_findings + state.agent_b_findings
+            + state.agent_c_findings + state.agent_d_findings
+            + state.skill_findings
         )
         logger.info(
             f"[Aggregator] 原始发现: 安全规则={len(state.rule_findings)}, "
             f"风格规则={len(state.style_findings)}, "
-            f"AgentA={len(state.agent_a_findings)}, AgentB={len(state.agent_b_findings)}"
+            f"AgentA={len(state.agent_a_findings)}, AgentB={len(state.agent_b_findings)}, "
+            f"AgentC={len(state.agent_c_findings)}, AgentD={len(state.agent_d_findings)}, "
+            f"Skill={len(state.skill_findings)}"
         )
 
         # 去重
         state.merged_findings = self._deduplicate(all_findings)
         logger.info(f"[Aggregator] 去重后: {len(state.merged_findings)} 个问题")
 
-        # 优先级排序
-        state.merged_findings = self._prioritize(state.merged_findings)
+        # 优先级排序（统一使用 Prioritizer）
+        prioritizer = Prioritizer()
+        state.merged_findings = prioritizer.sort(state.merged_findings)
 
         # 检测冲突
         conflicts = self._detect_conflicts(all_findings)
@@ -95,17 +107,6 @@ class Aggregator:
     def _normpath(self, file_path: str) -> str:
         """标准化路径为绝对路径，消除相对/绝对路径差异"""
         return os.path.abspath(file_path)
-
-    def _prioritize(self, findings: list[Finding]) -> list[Finding]:
-        """按严重程度和类别排序"""
-        return sorted(
-            findings,
-            key=lambda f: (
-                self.CATEGORY_PRIORITY.get(f.category, 0),
-                self.SEVERITY_PRIORITY.get(f.severity, 0),
-            ),
-            reverse=True,
-        )
 
     def _detect_conflicts(self, findings: list[Finding]) -> list[dict]:
         """检测同一位置不同Agent有不同意见的情况"""

@@ -1,18 +1,23 @@
-"""报告生成器 - 生成JSON和Markdown双格式审查报告
+"""报告生成器 - 精简版：仅存 JSON + 滚动窗口
+
+设计原则:
+  1. 只存 JSON（MD 按需通过 codefalcon export 生成）
+  2. 滚动窗口：保留最新 MAX_WINDOW 个报告，旧的自动删除
+  3. latest.json 永远指向最新一次审查
+  4. 无 archive、summaries、压缩机制（冗余数据已被滚动窗口取代）
 
 输出结构:
   reviews/
-    ├── 2026-06-20/           ← 按日期分文件夹
-    │   ├── 150000.json       ← 单次审查JSON
-    │   └── 150000.md         ← 单次审查Markdown
-    ├── archive/              ← 压缩后归档处
-    │   └── 2026-06-20/
-    └── summaries/            ← 每5次压缩摘要
-        └── 2026-06-20-HHmmss-summary.json
+    ├── latest.json            ← 永远是最新一次审查
+    ├── 2026-06-24-143000.json  ← 最近 MAX_WINDOW 个按时间戳命名
+    ├── 2026-06-24-143500.json
+    ├── ...
+    └── .review_count
 """
 
 import json
 import logging
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -22,54 +27,124 @@ from src.review.prioritizer import Prioritizer
 
 logger = logging.getLogger(__name__)
 
-COMPRESS_EVERY = 5  # 每N次审查触发一次压缩
+MAX_WINDOW = 10  # 最多保留多少个历史报告
 
 
 class Reporter:
-    """审查报告生成器
-    """
+    """审查报告生成器（精简版）"""
 
     def __init__(self, output_dir: str = "reviews"):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._counter_file = self.output_dir / ".review_count"
 
-    def generate(self, state):
-        """生成审查报告（接受 dict 或 ReviewState）"""
+    def generate(self, state) -> ReviewState:
+        """生成审查报告——只存 JSON，自动淘汰旧文件"""
         state = self._normalize_state(state)
         now = datetime.now()
-        today_dir = self.output_dir / now.strftime("%Y-%m-%d")
-        today_dir.mkdir(parents=True, exist_ok=True)
+        filename = now.strftime("%Y-%m-%d-%H%M%S") + ".json"
+        json_path = self.output_dir / filename
 
-        time_str = now.strftime("%H%M%S")
-
-        # 生成JSON
-        json_path = today_dir / f"{time_str}.json"
+        # 写入 JSON
         json_data = self._build_json_report(state, now)
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(json_data, f, ensure_ascii=False, indent=2)
-        logger.info(f"[Reporter] JSON报告已保存: {json_path}")
+        json_path.write_text(
+            json.dumps(json_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info(f"[Reporter] 报告已保存: {json_path}")
 
-        # 生成Markdown
-        md_path = today_dir / f"{time_str}.md"
-        md_content = self._build_markdown_report(state, now)
-        with open(md_path, 'w', encoding='utf-8') as f:
-            f.write(md_content)
-        logger.info(f"[Reporter] Markdown报告已保存: {md_path}")
+        # 更新 latest.json 符号链接
+        self._update_latest(json_path)
 
         # 更新待办事项
         from src.output.todo_manager import TodoManager
-        todo_mgr = TodoManager()
-        todo_mgr.append_todos(state.todos)
+        TodoManager().append_todos(state.todos)
 
-        # 计数 + 触发压缩
-        count = self._increment_count()
-        if count % COMPRESS_EVERY == 0:
-            self._compress_recent()
+        # 递增计数 + 淘汰旧文件
+        self._increment_count()
+        self._evict_old()
 
         return state
 
-    # ---- 内部方法 ----
+    # ---- 按需生成 Markdown ----
+
+    @staticmethod
+    def build_markdown(state) -> str:
+        """从 state 生成 Markdown 报告（供 export 命令按需调用）"""
+        state = Reporter._normalize_static(state)
+        now = datetime.now()
+        prioritizer = Prioritizer()
+        summary = prioritizer.get_summary(state.merged_findings)
+
+        def sev(f): return f.severity if not isinstance(f, dict) else f.get("severity", "info")
+        def cat(f): return f.category if not isinstance(f, dict) else f.get("category", "unknown")
+        def fp(f): return f.file_path if not isinstance(f, dict) else f.get("file_path", f.get("file", ""))
+        def ln(f): return f.line if not isinstance(f, dict) else f.get("line", 0)
+        def msg(f): return f.message if not isinstance(f, dict) else f.get("message", "")
+        def sug(f): return f.suggestion if not isinstance(f, dict) else f.get("suggestion", "")
+        def src(f): return f.agent_source if not isinstance(f, dict) else f.get("agent_source", f.get("source", ""))
+
+        lines = [
+            "# 🔍 CodeFalcon 审查报告",
+            "",
+            f"**审查时间**: {now.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"**审查文件数**: {len(state.target_files)}",
+            "",
+            "## 📊 摘要",
+            "",
+            "| 类别 | error | warning | info | 合计 |",
+            "|------|-------|---------|------|------|",
+        ]
+        categories = ["security", "bug", "performance", "style", "architecture", "spec"]
+        merged = state.merged_findings
+        for c in categories:
+            err = sum(1 for f in merged if cat(f) == c and sev(f) == "error")
+            warn = sum(1 for f in merged if cat(f) == c and sev(f) == "warning")
+            info = sum(1 for f in merged if cat(f) == c and sev(f) == "info")
+            total = err + warn + info
+            if total > 0:
+                lines.append(f"| {c} | {err} | {warn} | {info} | {total} |")
+
+        err_total = sum(1 for f in merged if sev(f) == "error")
+        warn_total = sum(1 for f in merged if sev(f) == "warning")
+        info_total = sum(1 for f in merged if sev(f) == "info")
+        lines.append(f"| **总计** | {err_total} | {warn_total} | {info_total} | {len(merged)} |")
+        lines.extend(["", "## 📋 问题详情", ""])
+
+        if not merged:
+            lines.append("✅ 未发现问题！代码质量良好。")
+        else:
+            for i, f in enumerate(merged, 1):
+                s = sev(f)
+                emoji = {"error": "🔴", "warning": "🟡", "info": "🔵"}.get(s, "⚪")
+                lines.append(f"### {i}. {emoji} [{s.upper()}] [{cat(f)}] {fp(f)}:{ln(f)}")
+                lines.extend(["", f"**问题**: {msg(f)}"])
+                if sug(f):
+                    lines.append(f"**建议**: {sug(f)}")
+                lines.extend([f"**来源**: {src(f)}", ""])
+
+        from src.utils.cost_tracker import CostTracker
+        cost = CostTracker().get_summary()
+        if cost["total_tokens"] > 0:
+            lines.extend([
+                "## 💰 Token消耗",
+                "",
+                f"- **总Token**: {cost['total_tokens']} (入{cost['total_input_tokens']} + 出{cost['total_output_tokens']})",
+                f"- **预估费用**: ${cost['estimated_cost_usd']:.6f}",
+            ])
+            for agent, info in cost.get("by_agent", {}).items():
+                lines.append(f"- {agent}: {info['tokens']} tokens ({info['calls']}次调用)")
+
+        # P4: 展示 Agent 审查异常
+        if hasattr(state, "agent_errors") and state.agent_errors:
+            lines.extend(["", "## ⚠️ 审查异常", ""])
+            for agent_name, errors in state.agent_errors.items():
+                lines.append(f"- **{agent_name}**: {', '.join(errors)}")
+
+        lines.extend(["", "---", "*由 CodeFalcon v0.1.0 生成*"])
+        return "\n".join(lines)
+
+    # ---- 内部 ----
 
     def _normalize_state(self, state):
         """将 dict 转换为 ReviewState"""
@@ -82,21 +157,41 @@ class Reporter:
         return ReviewState(
             target_paths=state.get("target_paths", []),
             target_files=state.get("target_files", {}),
+            filtered_files=state.get("filtered_files", {}),
+            related_code=state.get("related_code", {}),
+            dependency_graph=state.get("dependency_graph", {}),
+            spec_content=state.get("spec_content", ""),
+            rule_findings=[],
+            style_findings=[],
+            skill_findings=[],
+            agent_a_findings=[],
+            agent_b_findings=[],
+            agent_c_findings=[],
+            agent_d_findings=[],
             merged_findings=findings,
             todos=state.get("todos", []),
-            token_usage=state.get("token_usage", {}),
+            current_stage=state.get("current_stage", ""),
+            poisoning_detection_enabled=state.get("poisoning_detection_enabled", True),
         )
+
+    @classmethod
+    def _normalize_static(cls, state):
+        """静态版本的 normalize，供 build_markdown 使用"""
+        return cls(".")._normalize_state(state)
 
     def _build_json_report(self, state: ReviewState, now: datetime) -> dict:
         prioritizer = Prioritizer()
         summary = prioritizer.get_summary(state.merged_findings)
         from src.utils.cost_tracker import CostTracker
         cost_summary = CostTracker().get_summary()
-        return {
+
+        report = {
             "meta": {
                 "timestamp": now.isoformat(),
                 "version": "0.1.0",
                 "files_reviewed": list(state.target_files.keys()),
+                "mode": "diff" if state.diff_mode else "full",
+                "dry_run": state.dry_run,
             },
             "cost": {
                 "estimated_usd": cost_summary["estimated_cost_usd"],
@@ -120,169 +215,39 @@ class Reporter:
             ],
         }
 
-    def _build_markdown_report(self, state: ReviewState, now: datetime) -> str:
-        prioritizer = Prioritizer()
-        summary = prioritizer.get_summary(state.merged_findings)
-        lines = [
-            f"# 🔍 CodeFalcon 审查报告",
-            f"",
-            f"**审查时间**: {now.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"**审查文件数**: {len(state.target_files)}",
-            f"",
-            f"## 📊 摘要",
-            f"",
-            f"| 类别 | error | warning | info | 合计 |",
-            f"|------|-------|---------|------|------|",
-        ]
-        for cat in ["security", "bug", "performance", "style"]:
-            cat_count = summary["by_category"].get(cat, 0)
-            err = sum(1 for f in state.merged_findings if f.category == cat and f.severity == "error")
-            warn = sum(1 for f in state.merged_findings if f.category == cat and f.severity == "warning")
-            info = sum(1 for f in state.merged_findings if f.category == cat and f.severity == "info")
-            lines.append(f"| {cat} | {err} | {warn} | {info} | {cat_count} |")
-        lines.extend([
-            f"| **总计** | {summary['by_severity']['error']} | "
-            f"{summary['by_severity']['warning']} | "
-            f"{summary['by_severity']['info']} | "
-            f"{summary['total']} |",
-            f"",
-            f"## 📋 问题详情",
-            f"",
-        ])
-        if not state.merged_findings:
-            lines.append("✅ 未发现问题！代码质量良好。")
-        else:
-            for i, f in enumerate(state.merged_findings, 1):
-                emoji = {"error": "🔴", "warning": "🟡", "info": "🔵"}.get(f.severity, "⚪")
-                lines.append(f"### {i}. {emoji} [{f.severity.upper()}] [{f.category}] {f.file_path}:{f.line}")
-                lines.append(f"")
-                lines.append(f"**问题**: {f.message}")
-                if f.suggestion:
-                    lines.append(f"**建议**: {f.suggestion}")
-                lines.append(f"**来源**: {f.agent_source}")
-                lines.append(f"")
-        from src.utils.cost_tracker import CostTracker
-        cost_summary = CostTracker().get_summary()
-        if cost_summary["total_tokens"] > 0:
-            lines.append(f"## 💰 Token消耗")
-            lines.append(f"")
-            lines.append(f"- **总Token**: {cost_summary['total_tokens']} (入{cost_summary['total_input_tokens']} + 出{cost_summary['total_output_tokens']})")
-            lines.append(f"- **预估费用**: ${cost_summary['estimated_cost_usd']:.6f}")
-            for agent, info in cost_summary.get("by_agent", {}).items():
-                lines.append(f"- {agent}: {info['tokens']} tokens ({info['calls']}次调用)")
-            lines.append(f"")
-        lines.append(f"---")
-        lines.append(f"*由 CodeFalcon v0.1.0 生成*")
-        return '\n'.join(lines)
+        # P4: 附加 Agent 错误信息
+        if state.agent_errors:
+            report["agent_errors"] = state.agent_errors
 
-    # ---- 审查计数 ----
+        return report
+
+    def _update_latest(self, json_path: Path):
+        """更新 latest.json 指向最新报告"""
+        latest = self.output_dir / "latest.json"
+        shutil.copy2(str(json_path), str(latest))
+        logger.info(f"[Reporter] latest.json 已更新")
+
+    def _evict_old(self):
+        """淘汰超过 MAX_WINDOW 个的旧报告"""
+        json_files = sorted(
+            [f for f in self.output_dir.glob("*.json") if f.name != "latest.json"],
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+        for old in json_files[MAX_WINDOW:]:
+            old.unlink(missing_ok=True)
+            logger.info(f"[Reporter] 淘汰旧报告: {old}")
+
+    # ---- 计数 ----
 
     def _read_count(self) -> int:
-        """读取当前审查次数"""
         if self._counter_file.exists():
             return int(self._counter_file.read_text().strip())
         return 0
 
     def _increment_count(self) -> int:
-        """递增并返回审查次数"""
         count = self._read_count() + 1
         self._counter_file.write_text(str(count))
         return count
 
-    # ---- 压缩机制 ----
 
-    def _compress_recent(self):
-        """每 N 次审查后，压缩之前的报告（保留本次）"""
-        logger.info(f"[Reporter] 触发压缩（每{COMPRESS_EVERY}次）...")
-
-        # 搜集 N+1 个最近报告，排除最新的（本次刚生成的）
-        all_recent = self._collect_recent_reports(COMPRESS_EVERY + 1)
-        if len(all_recent) <= 1:
-            logger.warning("[Reporter] 无可压缩报告")
-            return
-
-        # 最新的一个保留不动，其余参与压缩
-        recent = all_recent[1:]  # 排除最新的
-        if not recent:
-            return
-
-        # 合并去重
-        merged = self._merge_findings(recent)
-        logger.info(f"[Reporter] 压缩后: {len(recent)}次审查 → {len(merged)}条唯一发现问题")
-
-        # 生成压缩摘要
-        self._write_compression_summary(recent, merged)
-
-        # 归档原始报告
-        self._archive_reports(recent)
-
-        logger.info("[Reporter] 压缩完成")
-
-    def _collect_recent_reports(self, n: int) -> list[dict]:
-        """搜集最近 N 个 JSON 报告"""
-        reports = []
-        # 按日期文件夹倒序收集
-        date_dirs = sorted(
-            [d for d in self.output_dir.iterdir() if d.is_dir() and d.name != "archive" and d.name != "summaries"],
-            reverse=True,
-        )
-        for date_dir in date_dirs:
-            json_files = sorted(date_dir.glob("*.json"), reverse=True)
-            for jf in json_files:
-                try:
-                    data = json.loads(jf.read_text(encoding="utf-8"))
-                    data["_path"] = str(jf)
-                    data["_md_path"] = str(jf.with_suffix(".md"))
-                    reports.append(data)
-                    if len(reports) >= n:
-                        return reports
-                except (json.JSONDecodeError, KeyError):
-                    continue
-        return reports
-
-    def _merge_findings(self, reports: list[dict]) -> list[dict]:
-        """合并多个报告的发现，去重"""
-        seen = set()
-        merged = []
-        for r in reports:
-            for f in r.get("findings", []):
-                key = f"{f.get('file')}:{f.get('line')}:{f.get('category')}"
-                if key not in seen:
-                    seen.add(key)
-                    merged.append(f)
-        return merged
-
-    def _write_compression_summary(self, reports: list[dict], merged: list[dict]):
-        """生成压缩摘要"""
-        now = datetime.now()
-        summaries_dir = self.output_dir / "summaries"
-        summaries_dir.mkdir(parents=True, exist_ok=True)
-
-        summary = {
-            "compressed_at": now.isoformat(),
-            "report_count": len(reports),
-            "unique_findings": len(merged),
-            "findings": merged,
-            "source_reports": [r["_path"] for r in reports],
-        }
-        json_path = summaries_dir / f"{now.strftime('%Y-%m-%d-%H%M%S')}-summary.json"
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(summary, f, ensure_ascii=False, indent=2)
-        logger.info(f"[Reporter] 压缩摘要已保存: {json_path}")
-
-    def _archive_reports(self, reports: list[dict]):
-        """将原始报告移动到 archive 目录"""
-        archive_dir = self.output_dir / "archive"
-        archive_dir.mkdir(parents=True, exist_ok=True)
-
-        for r in reports:
-            src_json = Path(r["_path"])
-            src_md = Path(r.get("_md_path", ""))
-            # 按原始日期放入 archive 子目录
-            dest_dir = archive_dir / src_json.parent.name
-            dest_dir.mkdir(parents=True, exist_ok=True)
-
-            if src_json.exists():
-                shutil.move(str(src_json), str(dest_dir / src_json.name))
-            if src_md.exists():
-                shutil.move(str(src_md), str(dest_dir / src_md.name))

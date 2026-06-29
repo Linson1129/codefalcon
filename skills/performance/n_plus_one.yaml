@@ -1,0 +1,15 @@
+name: n_plus_one_query
+description: 检测循环内的数据库查询（N+1 问题）
+category: performance
+severity: warning
+# 确定性 fallback：检测 for 循环内出现 .execute( / .query( 等数据库操作
+pattern: '(?ms)for\s+\w+\s+in\s+.+?:(?:(?!\n\S).)*?\.(execute|query)\s*\('
+# 这是一个 LLM 型 Skill，由 Agent 在审查时参考
+llm_prompt: |
+  请重点检查是否存在 N+1 查询问题：
+  - 在 for 循环内发起数据库查询
+  - 在列表推导式中发起数据库查询
+  - 在列表推导式中调用有 IO 操作的函数
+  建议：使用批量查询（IN 查询）或预加载（JOIN/Eager Loading）
+suggestion_template: '检测到循环内可能的数据库查询（N+1 反模式），建议使用批量查询'
+enabled: true

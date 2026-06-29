@@ -1,0 +1,14 @@
+name: loop_repeated_computation
+description: 检测循环内不必要的重复计算
+category: performance
+severity: warning
+# 确定性 fallback：检测 for 循环内 re.compile() 调用（经典性能反模式）
+pattern: '(?ms)for\s+\w+\s+in\s+.+?:(?:(?!\n\S).)*?\bre\.compile\b'
+llm_prompt: |
+  请检查循环内是否存在可以提到循环外的重复计算：
+  - len() 调用在循环内但集合不变
+  - 相同的函数调用在每次迭代都执行
+  - 正则表达式编译在循环内重复执行
+  建议：将不变的计算提到循环外。
+suggestion_template: '检测到循环内重复 re.compile()，建议将正则编译提到循环外'
+enabled: true

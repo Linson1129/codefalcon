@@ -160,16 +160,17 @@ class TestReporterIntegration:
         reporter = Reporter(output_dir=str(review_dir))
         reporter.generate(state)
 
-        # 验证日期文件夹
-        date_dirs = [d for d in review_dir.iterdir() if d.is_dir()]
-        assert len(date_dirs) >= 1, "应有日期文件夹"
+        # 验证 JSON 文件（扁平结构，不再有日期子目录）
+        json_files = sorted(
+            [f for f in review_dir.glob("*.json") if f.name != "latest.json"]
+        )
+        assert len(json_files) == 1, f"应有1个JSON报告, 实际: {json_files}"
 
-        json_files = list(date_dirs[0].glob("*.json"))
-        md_files = list(date_dirs[0].glob("*.md"))
-        assert len(json_files) == 1, f"应有1个JSON, 实际: {json_files}"
-        assert len(md_files) == 1, "应有1个Markdown"
+        # 验证 latest.json
+        latest = review_dir / "latest.json"
+        assert latest.exists(), "应有 latest.json"
 
-        # 验证JSON内容
+        # 验证 JSON 内容
         report = _json.loads(json_files[0].read_text(encoding="utf-8"))
         assert report["summary"]["total"] == 1
         assert report["findings"][0]["severity"] == "error"

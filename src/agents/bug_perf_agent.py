@@ -20,8 +20,8 @@ class BugPerfAgent(BaseAgent):
     - 生成交接文档给Agent B
     """
 
-    def __init__(self):
-        super().__init__(name="AgentA_BugPerf", model="deepseek-chat")
+    def __init__(self, dry_run: bool = False):
+        super().__init__(name="BugPerfAgent", model="deepseek-chat", dry_run=dry_run)
 
     def get_system_prompt(self) -> str:
         return """你是一个专业的代码审查专家，专注于发现代码中的逻辑Bug和性能问题。
@@ -64,21 +64,40 @@ class BugPerfAgent(BaseAgent):
 
         findings = []
 
-        for file_path, content in state.target_files.items():
+        # 获取 Skill 上下文
+        skill_context = self._build_skill_context(category="bug")
+        if not skill_context:
+            skill_context = self._build_skill_context(category="performance")
+
+        files_to_scan = state.filtered_files if state.filtered_files else state.target_files
+        for file_path, content in files_to_scan.items():
             try:
                 user_prompt = self._build_review_prompt(
-                    file_path, content, state.related_code, state.dependency_graph
+                    file_path, content, state.related_code,
+                    state.dependency_graph, skill_context,
                 )
                 result = self.call_llm(
                     system_prompt=self.get_system_prompt(),
                     user_prompt=user_prompt,
                 )
 
-                parsed = self._parse_response(result.get("content", "{}"))
-                findings.extend(self._to_findings(parsed.get("findings", []), file_path))
+                parsed = self.parse_response(
+                    result.get("content", "{}"),
+                    default_extra="",
+                )
+                findings.extend(
+                    self.to_findings(
+                        parsed.get("findings", []), file_path,
+                        agent_source="agent_a",
+                        default_category="bug",
+                        default_severity="warning",
+                    )
+                )
 
-                # 保存交接文档到state供Agent B使用
-                state.diff_context["agent_a_handover"] = parsed.get("handover", "")
+                # 保存交接文档到最后一个 finding 的 metadata
+                handover = parsed.get("handover", "")
+                if handover and findings:
+                    findings[-1].metadata["handover"] = handover
 
             except Exception as e:
                 logger.error(f"[{self.name}] 审查 {file_path} 失败: {e}")
@@ -91,10 +110,15 @@ class BugPerfAgent(BaseAgent):
         self, file_path: str, content: str,
         related_code: dict[str, list[str]],
         dependency_graph: dict,
+        skill_context: str = "",
     ) -> str:
-        """构建审查提示词（含代码调用关系 + 依赖上下文）"""
+        """构建审查提示词（含代码调用关系 + 依赖上下文 + Skill）"""
         prompt_parts = [f"请审查以下文件: {file_path}\n"]
         prompt_parts.append(f"```\n{content}\n```\n")
+
+        # Skill 上下文
+        if skill_context:
+            prompt_parts.append(skill_context)
 
         # 调用关系
         if file_path in related_code and related_code[file_path]:
@@ -102,45 +126,11 @@ class BugPerfAgent(BaseAgent):
             for snippet in related_code[file_path][:5]:
                 prompt_parts.append(f"- {snippet}")
 
-        # 依赖关系
-        dependents = dependency_graph.get("dependents", {}).get(file_path, [])
-        if dependents:
-            prompt_parts.append(f"\n依赖此文件的模块: {', '.join(dependents[:5])}")
-        imports = dependency_graph.get("import_graph", {}).get(file_path, [])
-        if imports:
-            prompt_parts.append(f"此文件依赖的模块: {', '.join(imports[:5])}")
+        # 依赖关系（使用基类方法）
+        dep_ctx = self._build_dependency_context(file_path, dependency_graph)
+        if dep_ctx:
+            prompt_parts.append(f"\n{dep_ctx}")
 
         prompt_parts.append("")
         return "\n".join(prompt_parts)
 
-    def _parse_response(self, content: str) -> dict:
-        """解析LLM响应为结构化数据"""
-        try:
-            # 尝试提取JSON
-            if "```json" in content:
-                start = content.index("```json") + 7
-                end = content.index("```", start)
-                content = content[start:end]
-            elif "```" in content:
-                start = content.index("```") + 3
-                end = content.index("```", start)
-                content = content[start:end]
-            return json.loads(content.strip())
-        except (json.JSONDecodeError, ValueError):
-            logger.warning(f"[{self.name}] LLM响应解析失败，使用空结果")
-            return {"findings": [], "handover": ""}
-
-    def _to_findings(self, raw_findings: list[dict], file_path: str) -> list[Finding]:
-        """将原始字典转换为Finding对象"""
-        result = []
-        for f in raw_findings:
-            result.append(Finding(
-                severity=f.get("severity", "warning"),
-                category=f.get("category", "bug"),
-                file_path=f.get("file_path", file_path),
-                line=f.get("line", 0),
-                message=f.get("message", ""),
-                suggestion=f.get("suggestion", ""),
-                agent_source="agent_a",
-            ))
-        return result

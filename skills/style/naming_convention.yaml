@@ -1,0 +1,15 @@
+name: naming_convention
+description: 检查命名规范（变量/函数/类名）
+category: style
+severity: info
+# 确定性 fallback：检测 Python 中明显违反 snake_case 的函数名（camelCase）
+pattern: '(?m)^\s*def\s+([a-z]+[A-Z][a-zA-Z]*)\s*\('
+llm_prompt: |
+  请检查命名规范：
+  - 变量/函数名：snake_case
+  - 类名：PascalCase
+  - 常量：UPPER_SNAKE_CASE
+  - 私有成员：以单下划线 _ 开头
+  - 避免单字母变量名（除了 i, j, k 等循环变量）
+suggestion_template: '函数名 {match} 应使用 snake_case 命名（全小写 + 下划线）'
+enabled: true

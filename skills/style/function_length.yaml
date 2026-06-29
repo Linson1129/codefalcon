@@ -1,0 +1,12 @@
+name: function_too_long
+description: 检查函数是否过长（建议不超过 50 行）
+category: style
+severity: info
+line_count_threshold: 50
+llm_prompt: |
+  请检查函数/方法长度：
+  - 函数体建议不超过 50 行
+  - 如果函数超过 50 行，考虑拆分
+  - 单一职责原则：一个函数只做一件事
+suggestion_template: '函数过长，建议拆分为多个小函数（每个不超过 50 行）'
+enabled: true
